@@ -1,0 +1,24 @@
+name: Build images
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -t voting-app-api:${{ github.sha }} -f Dockerfile .
+
+      - name: Build worker image
+        run: docker build -t voting-app-worker:${{ github.sha }} -f Dockerfile.worker .
+
+      - name: Build frontend image
+        run: docker build -t voting-app-frontend:${{ github.sha }} -f frontend/Dockerfile ./frontend
