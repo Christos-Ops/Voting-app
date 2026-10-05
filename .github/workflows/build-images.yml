@@ -80,7 +80,7 @@ jobs:
         run: docker compose config --quiet
 
       - name: Scan source and dependencies
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
@@ -109,7 +109,7 @@ jobs:
         run: docker build --tag voting-app-frontend:${{ github.sha }} --file frontend/Dockerfile ./frontend
 
       - name: Scan API image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: voting-app-api:${{ github.sha }}
           scanners: vuln
@@ -118,7 +118,7 @@ jobs:
           exit-code: "1"
 
       - name: Scan worker image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: voting-app-worker:${{ github.sha }}
           scanners: vuln
@@ -127,7 +127,7 @@ jobs:
           exit-code: "1"
 
       - name: Scan frontend image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: voting-app-frontend:${{ github.sha }}
           scanners: vuln
