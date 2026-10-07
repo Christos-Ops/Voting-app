@@ -111,3 +111,55 @@ npm run build
 ```
 
 API tests use SQLite and a Redis test double. Worker tests use Node's built-in test runner. A complete manual flow additionally requires running PostgreSQL, Redis, Flask, the worker, and the Vite frontend together.
+
+## Production deployment
+
+The `main` branch workflow runs CodeQL, API and worker tests, the frontend build, dependency/source scans, and Docker image scans. After these jobs pass, it publishes the API, worker, and frontend images to the public Docker Hub repositories `christos25/voting-app-api`, `christos25/voting-app-worker`, and `christos25/voting-app-frontend`, tagged with the commit SHA. It also keeps a `latest` convenience tag. A deployment job then uses GitHub OIDC to assume the configured AWS role and AWS Systems Manager (SSM) to deploy the same commit to the EC2 instance. Pull requests and pushes to `staging` do not deploy.
+
+The production stack is defined separately in `docker-compose.prod.yml`; the local `compose.yaml` remains for development. Production Compose pulls the SHA-tagged Docker Hub images and does not build application images on EC2. PostgreSQL and Redis are private to the Compose network. PostgreSQL data and Redis append-only queue data use named Docker volumes. Only the frontend HTTP port is published by this Compose file.
+
+### One-time EC2 preparation
+
+The EC2 instance must be online in Systems Manager and have permission to run SSM commands. The deployment job checks for Docker and the Compose plugin, installs them from Docker's official Ubuntu apt repository only if needed, and starts Docker. The SSM command must run as root; Systems Manager Run Command does this by default.
+
+Create the production environment file on the instance. The checked-in `.env.production.example` contains placeholders only; never commit the real `.env` file or put its contents in GitHub Actions or SSM commands.
+
+```bash
+sudo install -d -m 0755 /opt/voting-app
+sudo install -m 0600 /dev/null /opt/voting-app/.env
+sudoedit /opt/voting-app/.env
+```
+
+Add the variable names shown in `.env.production.example` to the instance file. Set a strong database password and JWT secret. To generate hexadecimal values that can safely be used in the Compose database URLs:
+
+```bash
+openssl rand -hex 32
+```
+
+The environment file needs `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `JWT_SECRET_KEY`, `RESULTS_CACHE_TTL`, and `LOG_LEVEL`. The deployment checks that the file exists but never prints its contents. Docker Hub credentials are not needed on EC2 because the repositories are public.
+
+### Manual first-admin creation
+
+After the first deployment, create the initial administrator once. Replace the SHA with the deployed commit SHA; the command prompts for the password interactively.
+
+```bash
+sudo env IMAGE_TAG=<DEPLOYED_COMMIT_SHA> docker compose \
+	--env-file /opt/voting-app/.env \
+	-f /opt/voting-app/docker-compose.prod.yml \
+	exec api python -m flask --app app create-admin admin@example.com
+```
+
+### Deployment and rollback
+
+Only a successful push to `main` proceeds to production deployment. The deployment job passes the commit SHA and public repository name to SSM, which downloads `docker-compose.prod.yml` from that exact commit, pulls all three images tagged with that SHA, starts the stack, and waits for PostgreSQL, Redis, API, worker, and frontend health checks. It does not download or print `/opt/voting-app/.env`.
+
+To roll back, run the production Compose commands on the instance with `IMAGE_TAG` set to a previously published commit SHA:
+
+```bash
+cd /opt/voting-app
+IMAGE_TAG=<PREVIOUS_COMMIT_SHA> docker compose --env-file .env -f docker-compose.prod.yml pull
+IMAGE_TAG=<PREVIOUS_COMMIT_SHA> docker compose --env-file .env -f docker-compose.prod.yml up -d --remove-orphans
+IMAGE_TAG=<PREVIOUS_COMMIT_SHA> docker compose --env-file .env -f docker-compose.prod.yml ps
+```
+
+Named volumes survive normal container replacement, but they are not backups. Database backup/restore procedures, HTTPS, and CloudWatch monitoring are separate operational work and are not configured by this deployment workflow.
