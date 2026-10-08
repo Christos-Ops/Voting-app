@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import func
+
 from .extensions import db
 
 
@@ -64,4 +66,9 @@ class Vote(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     election_id = db.Column(db.Integer, db.ForeignKey("elections.id", ondelete="RESTRICT"), nullable=False, index=True)
     candidate_id = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
