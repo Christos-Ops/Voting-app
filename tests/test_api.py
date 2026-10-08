@@ -126,6 +126,23 @@ def test_registration_and_login(client):
     assert identity.json["is_admin"] is False
 
 
+def test_vote_created_at_has_database_default_for_raw_sql_insert(client):
+    http, _redis = client
+    with http.application.app_context():
+        db.session.execute(
+            db.text(
+                "INSERT INTO votes (user_id, election_id, candidate_id) "
+                "VALUES (:user_id, :election_id, :candidate_id)"
+            ),
+            {"user_id": 1, "election_id": 1, "candidate_id": 1},
+        )
+        db.session.commit()
+        created_at = db.session.scalar(
+            db.select(Vote.created_at).where(Vote.user_id == 1, Vote.election_id == 1)
+        )
+    assert created_at is not None
+
+
 def test_vote_is_unique_per_election_and_jobs_are_scoped(client):
     http, fake_redis = client
     headers = {"Authorization": f"Bearer {token_for(http, 'voter@example.com')}"}
