@@ -162,10 +162,82 @@ IMAGE_TAG=<PREVIOUS_COMMIT_SHA> docker compose --env-file .env -f docker-compose
 IMAGE_TAG=<PREVIOUS_COMMIT_SHA> docker compose --env-file .env -f docker-compose.prod.yml ps
 ```
 
-Named volumes survive normal container replacement, but they are not backups. Database backup/restore procedures, HTTPS, and CloudWatch monitoring are separate operational work and are not configured by this deployment workflow.
+Named volumes survive normal container replacement, but they are not backups. Database backup/restore procedures and HTTPS are separate operational work and are not configured by this deployment workflow. Container logs and the CloudWatch setup are described in the CloudWatch monitoring section below.
 
 ### First deployment verification
 
 The first production deployment completed successfully on 2026-10-07 for merge commit `314dcf707b08ae7d5fc8e0c706140eefacd2c689` (PR #4). [GitHub Actions run #23](https://github.com/Christos-Ops/Voting-app/actions/runs/37660581765) reports the code/security checks, Docker image builds and scans, Docker Hub publishing, and SSM deployment as successful.
 
 The API, worker, and frontend images were published under the matching commit-SHA tag in `christos25/voting-app-api`, `christos25/voting-app-worker`, and `christos25/voting-app-frontend`. The SSM deployment step completed successfully after the Compose health checks passed for PostgreSQL, Redis, API, worker, and frontend. The detailed command output remains in the linked Actions run; no credentials or environment-file contents are included here.
+
+## CloudWatch monitoring
+
+Production containers send their stdout/stderr logs to CloudWatch Logs with Docker's `awslogs` driver. `docker-compose.prod.yml` applies this to `db`, `redis`, `api`, `worker`, and `frontend`. Each container gets its own log stream inside the log group `/voting-app/production`, tagged with the Docker container name, for example `voting-app-api-1` or `voting-app-worker-1`.
+
+Architecture:
+
+- **Container logs:** Docker sends each service's logs to CloudWatch Logs using the EC2 instance role. No application code change is required.
+- **Retention:** the log group keeps logs for 14 days.
+- **Alarms:** CloudWatch alarms publish to an SNS topic, which emails your address after you confirm the subscription.
+- **Deployment:** GitHub Actions still deploys with SSM. CloudWatch setup is separate and does not change the deployment workflow.
+
+The Compose file defaults to region `us-east-2` and log group `/voting-app/production`. Set `AWS_REGION` or `CLOUDWATCH_LOG_GROUP` in `/opt/voting-app/.env` only if you need different values.
+
+### One-time AWS setup
+
+Run these from a terminal with AWS CLI authenticated to account `725072161011`. Replace `my-email@example.com` before running the SNS subscription command.
+
+Create the log group and retention policy:
+
+```bash
+aws logs create-log-group --log-group-name /voting-app/production --region us-east-2
+aws logs put-retention-policy --log-group-name /voting-app/production --retention-in-days 14 --region us-east-2
+```
+
+Create an EC2 instance role for CloudWatch Logs and attach it to the production instance:
+
+```bash
+aws iam create-role --role-name VotingAppEc2CloudWatchRole --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name VotingAppEc2CloudWatchRole --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+aws iam create-instance-profile --instance-profile-name VotingAppEc2CloudWatchProfile
+aws iam add-role-to-instance-profile --instance-profile-name VotingAppEc2CloudWatchProfile --role-name VotingAppEc2CloudWatchRole
+aws ec2 associate-iam-instance-profile --instance-id i-0833f8deb41bb502d --iam-instance-profile Name=VotingAppEc2CloudWatchProfile --region us-east-2
+```
+
+Create the SNS alarm topic and subscribe your email:
+
+```bash
+aws sns create-topic --name voting-app-alarms --region us-east-2
+aws sns subscribe --topic-arn <TOPIC_ARN_FROM_PREVIOUS_COMMAND> --protocol email --notification-endpoint my-email@example.com --region us-east-2
+```
+
+Confirm the email subscription from AWS before expecting alarm emails.
+
+Create basic EC2 alarms:
+
+```bash
+aws cloudwatch put-metric-alarm --alarm-name voting-app-ec2-status-check-failed --namespace AWS/EC2 --metric-name StatusCheckFailed --dimensions Name=InstanceId,Value=i-0833f8deb41bb502d --statistic Maximum --period 60 --evaluation-periods 2 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --alarm-actions <TOPIC_ARN_FROM_PREVIOUS_COMMAND> --region us-east-2
+aws cloudwatch put-metric-alarm --alarm-name voting-app-ec2-high-cpu --namespace AWS/EC2 --metric-name CPUUtilization --dimensions Name=InstanceId,Value=i-0833f8deb41bb502d --statistic Average --period 300 --evaluation-periods 3 --threshold 80 --comparison-operator GreaterThanThreshold --alarm-actions <TOPIC_ARN_FROM_PREVIOUS_COMMAND> --region us-east-2
+```
+
+### Apply the logging change on EC2
+
+Docker only applies the `awslogs` driver when containers are recreated. The changed Compose file reaches EC2 through the normal `main` deployment, after the change is merged. To apply the logging change immediately on the instance, run this SSM Run Command script after the current IMAGE_TAG is known. It does not print `/opt/voting-app/.env`.
+
+```bash
+#!/bin/sh
+set -eu
+IMAGE_TAG=<DEPLOYED_COMMIT_SHA>
+export IMAGE_TAG
+cd /opt/voting-app
+test -s .env
+docker compose --env-file .env -f docker-compose.prod.yml config --quiet
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+docker compose --env-file .env -f docker-compose.prod.yml ps
+```
+
+Replace `<DEPLOYED_COMMIT_SHA>` with the commit currently running on EC2 before running the script in SSM Run Command.
+
+### Verify
+
+After the containers are recreated, open CloudWatch Logs, then check `/voting-app/production` for streams from `api`, `worker`, `frontend`, `db`, and `redis`. Confirm alarm notifications by opening the SNS confirmation email.
