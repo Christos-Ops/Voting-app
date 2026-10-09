@@ -1,0 +1,120 @@
+name: CloudWatch setup (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "725072161011"
+  EC2_INSTANCE_ID: i-0833f8deb41bb502d
+  ALERT_EMAIL: christimmy68@gmail.com
+  SNS_TOPIC_NAME: voting-app-alarms
+  LOG_RETENTION_DAYS: "14"
+  METRIC_NAMESPACE: VotingApp
+
+jobs:
+  setup-cloudwatch:
+    name: Create CloudWatch logs, alarms, and SNS alerts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::725072161011:role/Voting-appIAM
+          aws-region: us-east-2
+          role-session-name: VotingAppCloudWatchSetup
+
+      - name: Create log groups with 14-day retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          for group in /voting-app/api /voting-app/worker /voting-app/frontend /voting-app/db /voting-app/redis; do
+            if ! aws logs describe-log-groups --log-group-name-prefix "$group" \
+                --query "logGroups[?logGroupName=='$group'].logGroupName" --output text | grep -qx "$group"; then
+              aws logs create-log-group --log-group-name "$group"
+              echo "Created log group $group"
+            else
+              echo "Log group $group already exists"
+            fi
+            aws logs put-retention-policy --log-group-name "$group" --retention-in-days "$LOG_RETENTION_DAYS"
+          done
+
+      - name: Create SNS topic and email subscription
+        shell: bash
+        run: |
+          set -euo pipefail
+          topic_arn="$(aws sns create-topic --name "$SNS_TOPIC_NAME" --query TopicArn --output text)"
+          echo "TOPIC_ARN=$topic_arn" >> "$GITHUB_ENV"
+          # SNS returns the existing subscription when the same email is already subscribed.
+          aws sns subscribe --topic-arn "$topic_arn" --protocol email --notification-endpoint "$ALERT_EMAIL" >/dev/null
+          echo "Email subscription requested for $ALERT_EMAIL. AWS will send a confirmation email that must be accepted."
+
+      - name: Create EC2 CPU alarm above 80%
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudwatch put-metric-alarm \
+            --alarm-name voting-app-ec2-high-cpu \
+            --namespace AWS/EC2 \
+            --metric-name CPUUtilization \
+            --dimensions Name=InstanceId,Value="$EC2_INSTANCE_ID" \
+            --statistic Average \
+            --period 300 \
+            --evaluation-periods 2 \
+            --threshold 80 \
+            --comparison-operator GreaterThanThreshold \
+            --treat-missing-data notBreaching \
+            --alarm-actions "$TOPIC_ARN"
+
+      - name: Create ERROR metric filters and alarms for API and worker logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The worker writes lowercase "level":"error", while Flask uses uppercase ERROR,
+          # so the pattern matches both spellings.
+          for service in api worker; do
+            aws logs put-metric-filter \
+              --log-group-name "/voting-app/$service" \
+              --filter-name "voting-app-$service-error" \
+              --filter-pattern '?ERROR ?error' \
+              --metric-transformations "metricName=${service^}ErrorCount,metricNamespace=$METRIC_NAMESPACE,metricValue=1,defaultValue=0"
+
+            aws cloudwatch put-metric-alarm \
+              --alarm-name "voting-app-$service-errors" \
+              --namespace "$METRIC_NAMESPACE" \
+              --metric-name "${service^}ErrorCount" \
+              --statistic Sum \
+              --period 300 \
+              --evaluation-periods 1 \
+              --threshold 1 \
+              --comparison-operator GreaterThanOrEqualToThreshold \
+              --treat-missing-data notBreaching \
+              --alarm-actions "$TOPIC_ARN"
+          done
+
+      - name: Start CloudWatch Agent on EC2 through SSM
+        shell: bash
+        run: |
+          set -euo pipefail
+          command_id="$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Start CloudWatch Agent" \
+            --parameters '{"commands":["sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a start"]}' \
+            --query 'Command.CommandId' --output text)"
+          echo "SSM command submitted: $command_id"
+          for attempt in $(seq 1 60); do
+            status="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$EC2_INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || true)"
+            case "$status" in
+              Success) echo "CloudWatch Agent start succeeded."; exit 0 ;;
+              Failed|TimedOut|Cancelled) echo "CloudWatch Agent start ended with status: $status" >&2; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "Timed out waiting for the SSM command." >&2
+          exit 1
