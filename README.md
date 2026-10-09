@@ -163,3 +163,9 @@ IMAGE_TAG=<PREVIOUS_COMMIT_SHA> docker compose --env-file .env -f docker-compose
 ```
 
 Named volumes survive normal container replacement, but they are not backups. Database backup/restore procedures, HTTPS, and CloudWatch monitoring are separate operational work and are not configured by this deployment workflow.
+
+### First deployment verification
+
+The first production deployment completed successfully on 2026-10-07 for merge commit `314dcf707b08ae7d5fc8e0c706140eefacd2c689` (PR #4). [GitHub Actions run #23](https://github.com/Christos-Ops/Voting-app/actions/runs/37660581765) reports the code/security checks, Docker image builds and scans, Docker Hub publishing, and SSM deployment as successful.
+
+The API, worker, and frontend images were published under the matching commit-SHA tag in `christos25/voting-app-api`, `christos25/voting-app-worker`, and `christos25/voting-app-frontend`. The SSM deployment step completed successfully after the Compose health checks passed for PostgreSQL, Redis, API, worker, and frontend. The detailed command output remains in the linked Actions run; no credentials or environment-file contents are included here.
