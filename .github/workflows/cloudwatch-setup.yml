@@ -148,11 +148,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The remote script installs the agent only when it is missing, then applies the SSM config.
+          remote_script="$(cat <<'REMOTE'
+          set -euo pipefail
+          AGENT_CTL=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+          if [ ! -x "$AGENT_CTL" ]; then
+            cd /tmp
+            curl -fsSLo amazon-cloudwatch-agent.deb https://amazoncloudwatch-agent-us-east-2.s3.us-east-2.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+            sudo dpkg -i ./amazon-cloudwatch-agent.deb
+          fi
+          sudo "$AGENT_CTL" -a fetch-config -m ec2 -c ssm:AmazonCloudWatch-linux -s
+          REMOTE
+          )"
+          parameters="$(jq -cn --arg script "$remote_script" '{commands: [$script]}')"
+
           command_id="$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "Fetch and start CloudWatch Agent config from SSM" \
-            --parameters '{"commands":["sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c ssm:AmazonCloudWatch-linux -s"]}' \
+            --comment "Install if missing, then fetch and start CloudWatch Agent config from SSM" \
+            --parameters "$parameters" \
             --query 'Command.CommandId' --output text)"
           echo "SSM command submitted: $command_id"
           for attempt in $(seq 1 60); do
