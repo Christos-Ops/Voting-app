@@ -96,7 +96,9 @@ function PublicHome({ onSignIn }) {
       <h1>Make your<br /><em>voice count.</em></h1>
       <p className="welcome-copy">A simple, secure place to take part in the decisions that shape your community.</p>
       <div className="welcome-rule"><span>01</span><span>One account. One vote in each election.</span></div>
-      <div className="welcome-art" aria-hidden="true"><div className="art-ring ring-one" /><div className="art-ring ring-two" /><div className="art-center">YOUR<br />VOICE</div><span className="art-mark mark-a">✓</span><span className="art-mark mark-b">✳</span></div>
+      <img className="welcome-photo" src="/community-polling.jpg" alt="Three women at a community polling place, one checking the voter register" />
+      <div className="welcome-photo-note"><span>COMMUNITY VOICES</span><span>POLLING PLACE · 1957</span></div>
+      <a className="welcome-photo-credit" href="https://unsplash.com/photos/women-signing-ledger-at-polling-station-KZURtgbunh4" target="_blank" rel="noreferrer">Photo: Library of Congress / Unsplash</a>
     </section>
     <section className="auth-panel">
       <div className="auth-heading"><span className="eyebrow">{mode === 'login' ? 'WELCOME BACK' : 'GET STARTED'}</span><h2>{mode === 'login' ? 'Sign in to Ballot' : 'Create your account'}</h2><p>{mode === 'login' ? 'Your next vote is waiting.' : 'Join an election with a few simple details.'}</p></div>

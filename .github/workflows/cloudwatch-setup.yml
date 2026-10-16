@@ -11,7 +11,7 @@ env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "725072161011"
   EC2_INSTANCE_ID: i-0833f8deb41bb502d
-  ALERT_EMAIL: christimmy68@gmail.com
+  ALERT_EMAIL: ${{ secrets.CLOUDWATCH_ALERT_EMAIL }}
   SNS_TOPIC_NAME: voting-app-alarms
   LOG_RETENTION_DAYS: "14"
   METRIC_NAMESPACE: VotingApp
@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          : "${ALERT_EMAIL:?Set the CLOUDWATCH_ALERT_EMAIL repository secret}"
           topic_arn="$(aws sns create-topic --name "$SNS_TOPIC_NAME" --query TopicArn --output text)"
           echo "TOPIC_ARN=$topic_arn" >> "$GITHUB_ENV"
           # SNS returns the existing subscription when the same email is already subscribed.
