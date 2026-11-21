@@ -17,6 +17,7 @@ Ballot is a small full-stack voting application with voter and administrator wor
 - The deployment script installs Docker Engine and the Compose plugin from Docker's official Ubuntu apt repository when either is missing, then enables Docker.
 - After starting the stack, the deploy script waits for PostgreSQL, Redis, API, worker, and frontend health checks before reporting success.
 - Application secrets stay in `/opt/voting-app/.env` on EC2; deployment checks the file and sets its permissions without transferring or printing its contents. CloudWatch collects per-service logs and raises CPU and API/worker error alarms.
+- The manually dispatched CloudWatch workflow configures log groups, alarms, SNS email alerts, and the CloudWatch Agent through AWS CLI and Systems Manager.
 
 ## Architecture
 
@@ -80,6 +81,49 @@ On the instance, the deployment script:
 4. Validates the Compose configuration, pulls the images tagged with that commit SHA, and starts the stack with `--remove-orphans`.
 5. Polls the health state of `db`, `redis`, `api`, `worker`, and `frontend`; a failed health gate fails the deployment job but does not automatically roll back containers.
 
+## CloudWatch monitoring
+
+The manually dispatched [CloudWatch setup workflow](.github/workflows/cloudwatch-setup.yml) is the monitoring configuration as code for this project. It creates or updates CloudWatch log groups and alarms, creates the SNS email subscription, stores the CloudWatch Agent configuration in Systems Manager Parameter Store, and applies that configuration to the existing EC2 instance through Systems Manager Run Command.
+
+```mermaid
+flowchart LR
+	Operator[Manual workflow dispatch] --> Workflow[GitHub Actions CloudWatch setup]
+	Workflow -->|OIDC| ActionsRole[GitHub Actions IAM role]
+	Workflow -->|Create groups, filters, alarms, SNS| CloudWatch[CloudWatch and SNS]
+	Workflow -->|Store config and send Run Command| SSM[Systems Manager]
+	SSM -->|Install if needed and apply config| EC2[EC2 instance]
+	EC2 --> Agent[CloudWatch Agent]
+	Agent -->|CPU, memory, disk metrics every 60 seconds| Metrics[CloudWatch metrics]
+	EC2 --> Docker[Docker services]
+	Docker -->|awslogs driver| Groups[CloudWatch log groups]
+	Groups --> Filters[API and worker error filters]
+	Filters --> LogAlarms[API and worker alarms]
+	EC2 -->|AWS/EC2 CPU metric| CpuAlarm[CPU alarm]
+	LogAlarms --> SNS[SNS email notification]
+	CpuAlarm --> SNS
+	SNS --> Email[Confirmed alert email]
+```
+
+The production Compose file sends each service's container logs directly to its own CloudWatch Logs group using Docker's `awslogs` driver; those logs do not pass through the CloudWatch Agent. The workflow creates `/voting-app/api`, `/voting-app/worker`, `/voting-app/frontend`, `/voting-app/db`, and `/voting-app/redis`, with 14-day retention. CloudWatch manages storage rather than reserving a fixed capacity.
+
+The configured alarms are:
+
+- EC2 average CPU above 80% for two 5-minute periods.
+- An API log event containing `ERROR`, or a worker JSON log event with `level` equal to `error`; either alarm triggers when at least one matching event is counted in a 5-minute period.
+
+The CloudWatch Agent also publishes CPU, memory, and disk metrics every 60 seconds, but this workflow does not create memory or disk alarms. It does not create a CloudWatch dashboard. View log events in CloudWatch Logs and metric data in CloudWatch Metrics. Alarm emails are sent through the SNS subscription configured by the `CLOUDWATCH_ALERT_EMAIL` GitHub Actions secret, which must be confirmed by its recipient. The CloudWatch setup workflow configures monitoring; it does not deploy the application. Production application deployment runs on pushes to `main`.
+
+## IAM permissions
+
+Two IAM roles support the AWS workflows and EC2 monitoring:
+
+| Role purpose | Configured permissions | Use |
+| --- | --- | --- |
+| GitHub Actions OIDC role | AWS-managed `PowerUserAccess` | GitHub Actions exchanges its OIDC identity for temporary AWS credentials to run deployment and CloudWatch setup operations. This is broad service access, not a least-privilege policy. |
+| EC2 instance profile role | `AmazonSSMManagedInstanceCore` and `CloudWatchAgentServerPolicy` | Allows the SSM Agent to register and receive commands, and allows CloudWatch publishing required by the agent and the Docker `awslogs` driver. |
+
+GitHub Actions also declares `contents: read` and `id-token: write` so it can read the repository and request an OIDC token. The IAM roles, attached policies, and OIDC trust conditions are configured in AWS, not defined by this repository; the trust policy should restrict which repository and refs can assume the GitHub Actions role. The CloudWatch workflow uses AWS CLI commands as imperative infrastructure-as-code; it does not provision the EC2 instance, IAM roles, or network foundation.
+
 ## Production stack
 
 `compose.yaml` is the development stack; `docker-compose.prod.yml` is the deployment stack.
@@ -102,7 +146,7 @@ On the instance, the deployment script:
 | Scan before publishing | CodeQL, Trivy source/dependency scans, and Trivy image scans must succeed before images can be pushed. |
 | Separate production Compose file | Keeps local builds and published-image deployment settings distinct, including production health checks, persistence, and logging. |
 | Health-gated deployment | Detects services that fail to become healthy; it does not provide rolling traffic shifts or automatic rollback. |
-| CloudWatch logs and alarms | Provides per-service logs and limited CPU/error alerting without changing application code; metric and alarm coverage is narrow. |
+| CloudWatch logs and alarms | Provides per-service logs and CPU/error alerting without changing application code; memory and disk metrics are collected but have no alarms. |
 
 ## Run locally
 
@@ -163,7 +207,7 @@ npm run dev
 ## Roadmap and known limitations
 
 - No automatic rollback, deployment concurrency group, or production approval gate is configured.
-- There is no infrastructure-as-code definition in the repository. The IAM role policy and trust conditions are external, so least privilege cannot be verified from this codebase.
+- The CloudWatch setup is codified as an imperative GitHub Actions workflow, but there is no declarative infrastructure definition for the EC2 instance, IAM roles, or networking. IAM policies and OIDC trust conditions are external, so their effective permissions and least-privilege scope cannot be verified from this codebase.
 - Production publishes plain HTTP on port 80; HTTPS and TLS termination are not configured here.
 - No database backup/restore automation or migration rollback is provided. The legacy election migration is intentionally irreversible.
 - Application secrets are not stored in Secrets Manager; they remain in the EC2 `.env` file.
